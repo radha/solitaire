@@ -4,6 +4,7 @@
 //! visible, the difficulty, the cursor/selection for keyboard play, per-game
 //! undo stacks, and the status line.
 
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::freecell::FreeCellGame;
@@ -31,14 +32,6 @@ impl GameMode {
             GameMode::SpiderMini => "Spider-mini",
         }
     }
-
-    pub fn menu_blurb(self) -> &'static str {
-        match self {
-            GameMode::Klondike => "Classic 7-pile patience with stock, waste and foundations.",
-            GameMode::FreeCell => "All cards visible: 8 tableau, free cells, supermove sequences.",
-            GameMode::SpiderMini => "10 tableau piles, stock deals, clear K->A same-suit runs.",
-        }
-    }
 }
 
 /// Which screen is visible.
@@ -58,18 +51,6 @@ pub enum CursorArea {
     FreeCell,
     Stock,
     Waste,
-}
-
-impl CursorArea {
-    pub fn label(self) -> &'static str {
-        match self {
-            CursorArea::Tableau => "tableau",
-            CursorArea::Foundation => "foundation",
-            CursorArea::FreeCell => "cell",
-            CursorArea::Stock => "stock",
-            CursorArea::Waste => "waste",
-        }
-    }
 }
 
 /// Cursor position: a pile area plus an index inside it.
@@ -99,6 +80,15 @@ pub enum Dir {
 
 const MAX_UNDO: usize = 300;
 
+/// A destructive action (discards the current game or exits) awaiting a
+/// second keypress to confirm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingConfirm {
+    Quit,
+    NewGame,
+    Restart,
+}
+
 /// Top-level app state.
 #[derive(Debug)]
 pub struct App {
@@ -117,9 +107,10 @@ pub struct App {
     pub status_message: String,
     pub should_quit: bool,
     pub started_at: Instant,
-    undo_klondike: Vec<KlondikeGame>,
-    undo_freecell: Vec<FreeCellGame>,
-    undo_spider: Vec<SpiderGame>,
+    pub confirm: Option<PendingConfirm>,
+    undo_klondike: VecDeque<KlondikeGame>,
+    undo_freecell: VecDeque<FreeCellGame>,
+    undo_spider: VecDeque<SpiderGame>,
 }
 
 impl Default for App {
@@ -150,14 +141,18 @@ impl App {
             status_message: String::from("Menu: up/down picks a game, left/right sets difficulty."),
             should_quit: false,
             started_at: Instant::now(),
-            undo_klondike: Vec::new(),
-            undo_freecell: Vec::new(),
-            undo_spider: Vec::new(),
+            confirm: None,
+            undo_klondike: VecDeque::new(),
+            undo_freecell: VecDeque::new(),
+            undo_spider: VecDeque::new(),
         }
     }
 
     // ---- mode / screen ----
 
+    /// Switch mode directly, bypassing the menu. Production code always
+    /// goes through `menu_confirm`; this is a test-setup convenience.
+    #[cfg(test)]
     pub fn switch_mode(&mut self, mode: GameMode) {
         self.mode = mode;
         self.selected = None;
@@ -178,6 +173,46 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+    }
+
+    // ---- destructive-action confirmation ----
+
+    /// Ask for confirmation before quitting (q/Esc on the table).
+    pub fn request_quit(&mut self) {
+        self.confirm = Some(PendingConfirm::Quit);
+        self.status_message = "Quit Solitaire? (y to confirm, any other key to cancel)".to_string();
+    }
+
+    /// Ask for confirmation before discarding the game for a fresh deal.
+    pub fn request_new_game(&mut self) {
+        self.confirm = Some(PendingConfirm::NewGame);
+        self.status_message =
+            "Discard this game and deal a new one? (y to confirm, any other key to cancel)"
+                .to_string();
+    }
+
+    /// Ask for confirmation before restarting with a fresh shuffle.
+    pub fn request_restart(&mut self) {
+        self.confirm = Some(PendingConfirm::Restart);
+        self.status_message =
+            "Restart with a fresh shuffle? (y to confirm, any other key to cancel)".to_string();
+    }
+
+    /// y/Enter on a pending confirmation: carry out the action.
+    pub fn confirm_pending(&mut self) {
+        match self.confirm.take() {
+            Some(PendingConfirm::Quit) => self.quit(),
+            Some(PendingConfirm::NewGame) => self.new_game(),
+            Some(PendingConfirm::Restart) => self.restart(),
+            None => {}
+        }
+    }
+
+    /// Any other key on a pending confirmation: back out, nothing changed.
+    pub fn cancel_pending(&mut self) {
+        if self.confirm.take().is_some() {
+            self.status_message = "Cancelled.".to_string();
+        }
     }
 
     // ---- menu ----
@@ -207,11 +242,9 @@ impl App {
         let diff_changed = difficulty != self.difficulty;
         self.difficulty = difficulty;
         self.mode = mode;
-        // Klondike difficulty (redeal rules) applies live to the current deal.
+        // Klondike difficulty (redeal rules) applies live; the current deal
+        // is kept as-is rather than reshuffled.
         self.klondike.difficulty = difficulty;
-        if diff_changed || mode == GameMode::Klondike {
-            // keep the Klondike deal; only the rules changed
-        }
         match mode {
             GameMode::Klondike => {}
             GameMode::FreeCell => {
@@ -280,21 +313,21 @@ impl App {
         match self.mode {
             GameMode::Klondike => {
                 if self.undo_klondike.len() >= MAX_UNDO {
-                    self.undo_klondike.remove(0);
+                    self.undo_klondike.pop_front();
                 }
-                self.undo_klondike.push(self.klondike.clone());
+                self.undo_klondike.push_back(self.klondike.clone());
             }
             GameMode::FreeCell => {
                 if self.undo_freecell.len() >= MAX_UNDO {
-                    self.undo_freecell.remove(0);
+                    self.undo_freecell.pop_front();
                 }
-                self.undo_freecell.push(self.freecell.clone());
+                self.undo_freecell.push_back(self.freecell.clone());
             }
             GameMode::SpiderMini => {
                 if self.undo_spider.len() >= MAX_UNDO {
-                    self.undo_spider.remove(0);
+                    self.undo_spider.pop_front();
                 }
-                self.undo_spider.push(self.spider.clone());
+                self.undo_spider.push_back(self.spider.clone());
             }
         }
     }
@@ -309,13 +342,13 @@ impl App {
 
     pub fn undo(&mut self) {
         let restored = match self.mode {
-            GameMode::Klondike => self.undo_klondike.pop().map(|g| {
+            GameMode::Klondike => self.undo_klondike.pop_back().map(|g| {
                 self.klondike = g;
             }),
-            GameMode::FreeCell => self.undo_freecell.pop().map(|g| {
+            GameMode::FreeCell => self.undo_freecell.pop_back().map(|g| {
                 self.freecell = g;
             }),
-            GameMode::SpiderMini => self.undo_spider.pop().map(|g| {
+            GameMode::SpiderMini => self.undo_spider.pop_back().map(|g| {
                 self.spider = g;
             }),
         };
@@ -359,35 +392,11 @@ impl App {
 
     // ---- draw / auto / hint ----
 
-    /// Draw a Klondike card and report the result in the status line.
-    pub fn draw_klondike(&mut self) {
-        if self.mode != GameMode::Klondike {
-            return;
-        }
-        if self.klondike.draw_from_stock() {
-            self.status_message = format!(
-                "Drew. Score: {} Moves: {}.",
-                self.klondike.score(),
-                self.klondike.move_count()
-            );
-        } else if self.klondike.is_won() {
-            self.status_message = "Already won!".to_string();
-        } else if self.klondike.is_game_over() {
-            self.status_message = "Game over: stock passes exhausted.".to_string();
-        } else {
-            self.status_message = "Nothing to draw.".to_string();
-        }
-    }
-
-    /// Hint text for the active Klondike game, if any move is suggested.
-    pub fn klondike_hint(&self) -> Option<String> {
-        self.klondike.hint_text()
-    }
-
     /// Draw / deal for the active game (d key).
     pub fn draw(&mut self) {
         match self.mode {
             GameMode::Klondike => {
+                let was_game_over = self.klondike.is_game_over();
                 self.push_undo_silent();
                 if self.klondike.draw_from_stock() {
                     self.status_message = format!(
@@ -396,13 +405,17 @@ impl App {
                         self.klondike.move_count()
                     );
                     self.check_win();
+                } else if !was_game_over && self.klondike.is_game_over() {
+                    // Hard-mode redeal exhaustion mutates state (sets
+                    // game_over) on this same failing call, so keep the
+                    // pre-draw snapshot instead of discarding it — otherwise
+                    // `u` would skip past it and undo one move too many.
+                    self.status_message =
+                        "Game over: stock passes exhausted (u to undo).".to_string();
                 } else {
-                    self.undo_klondike.pop();
+                    self.undo_klondike.pop_back();
                     if self.klondike.is_won() {
                         self.status_message = "Already won!".to_string();
-                    } else if self.klondike.is_game_over() {
-                        self.status_message =
-                            "Game over: stock passes exhausted (u to undo).".to_string();
                     } else {
                         self.status_message = "Nothing to draw.".to_string();
                     }
@@ -437,7 +450,7 @@ impl App {
                 self.push_undo_silent();
                 let moved = self.klondike.auto_finish();
                 if moved == 0 {
-                    self.undo_klondike.pop();
+                    self.undo_klondike.pop_back();
                     self.status_message = "No cards can go to foundations right now.".to_string();
                 } else {
                     self.status_message = format!("Auto-moved {moved} card(s) to foundations.");
@@ -451,7 +464,7 @@ impl App {
                     // Fall back to moving everything currently placeable.
                     let moved_all = self.freecell.auto_move_all_to_foundations();
                     if moved_all == 0 {
-                        self.undo_freecell.pop();
+                        self.undo_freecell.pop_back();
                         self.status_message =
                             "No cards can go to foundations right now.".to_string();
                     } else {
@@ -468,7 +481,7 @@ impl App {
                 self.push_undo_silent();
                 let moved = self.spider.auto_remove_completed();
                 if moved == 0 {
-                    self.undo_spider.pop();
+                    self.undo_spider.pop_back();
                     self.status_message = "No complete K->A run to bank.".to_string();
                 } else {
                     self.status_message = format!("Banked {moved} sequence(s)!");
@@ -506,20 +519,23 @@ impl App {
     // ---- cursor navigation ----
 
     /// Pile areas in Tab order for the active game.
-    fn tab_areas(&self) -> Vec<CursorArea> {
+    fn tab_areas(&self) -> &'static [CursorArea] {
+        const KLONDIKE: [CursorArea; 4] = [
+            CursorArea::Stock,
+            CursorArea::Waste,
+            CursorArea::Foundation,
+            CursorArea::Tableau,
+        ];
+        const FREECELL: [CursorArea; 3] = [
+            CursorArea::FreeCell,
+            CursorArea::Foundation,
+            CursorArea::Tableau,
+        ];
+        const SPIDER: [CursorArea; 2] = [CursorArea::Stock, CursorArea::Tableau];
         match self.mode {
-            GameMode::Klondike => vec![
-                CursorArea::Stock,
-                CursorArea::Waste,
-                CursorArea::Foundation,
-                CursorArea::Tableau,
-            ],
-            GameMode::FreeCell => vec![
-                CursorArea::FreeCell,
-                CursorArea::Foundation,
-                CursorArea::Tableau,
-            ],
-            GameMode::SpiderMini => vec![CursorArea::Stock, CursorArea::Tableau],
+            GameMode::Klondike => &KLONDIKE,
+            GameMode::FreeCell => &FREECELL,
+            GameMode::SpiderMini => &SPIDER,
         }
     }
 
@@ -775,20 +791,150 @@ impl App {
         } else {
             self.pop_undo();
             // keep the grab so the player can try another target
-            self.status_message = "Illegal move: that card cannot go there.".to_string();
+            self.status_message = self.illegal_move_reason(sel, cur);
+        }
+    }
+
+    /// Explain *why* a failed placement was refused, so the player doesn't
+    /// have to guess between color/rank/suit/capacity rules by trial and error.
+    fn illegal_move_reason(&self, sel: Selected, cur: Cursor) -> String {
+        const GENERIC: &str = "Illegal move: that card cannot go there.";
+        match self.mode {
+            GameMode::Klondike => {
+                let moving = match sel.area {
+                    CursorArea::Waste => self.klondike.waste_top(),
+                    CursorArea::Foundation => self.klondike.foundation_top(sel.index),
+                    CursorArea::Tableau => {
+                        let pile = &self.klondike.tableau[sel.index];
+                        let len = pile.len();
+                        (len >= sel.count).then(|| pile[len - sel.count])
+                    }
+                    _ => None,
+                };
+                let Some(card) = moving else {
+                    return GENERIC.to_string();
+                };
+                match cur.area {
+                    CursorArea::Foundation => match self.klondike.foundation_top(cur.index) {
+                        None if !card.rank.is_ace() => {
+                            "Illegal move: foundations start with an Ace.".to_string()
+                        }
+                        Some(top) if top.suit != card.suit => {
+                            "Illegal move: foundations only take the same suit, one rank up."
+                                .to_string()
+                        }
+                        Some(top) if card.rank.value() != top.rank.value() + 1 => {
+                            "Illegal move: foundations need the next rank up.".to_string()
+                        }
+                        _ => GENERIC.to_string(),
+                    },
+                    CursorArea::Tableau => match self.klondike.tableau_top(cur.index) {
+                        None if !card.rank.is_king() => {
+                            "Illegal move: only a King can start an empty column.".to_string()
+                        }
+                        Some(top) if top.color() == card.color() => {
+                            "Illegal move: tableau piles need alternating colors.".to_string()
+                        }
+                        Some(top) if card.rank.value() + 1 != top.rank.value() => {
+                            "Illegal move: tableau piles need one rank lower than the destination card."
+                                .to_string()
+                        }
+                        _ => GENERIC.to_string(),
+                    },
+                    _ => GENERIC.to_string(),
+                }
+            }
+            GameMode::FreeCell => {
+                let moving = match sel.area {
+                    CursorArea::Tableau => {
+                        let pile = &self.freecell.tableau[sel.index];
+                        let len = pile.len();
+                        (len >= sel.count).then(|| pile[len - sel.count])
+                    }
+                    CursorArea::FreeCell => self.freecell.cell_card(sel.index),
+                    CursorArea::Foundation => self.freecell.foundation_top(sel.index),
+                    _ => None,
+                };
+                let Some(card) = moving else {
+                    return GENERIC.to_string();
+                };
+                match cur.area {
+                    CursorArea::Tableau => {
+                        if sel.area == CursorArea::Tableau
+                            && sel.count > self.freecell.max_movable(cur.index)
+                        {
+                            format!(
+                                "Illegal move: not enough free cells/empty columns to move {} card(s) at once (max {} here).",
+                                sel.count,
+                                self.freecell.max_movable(cur.index)
+                            )
+                        } else {
+                            match self.freecell.tableau_top(cur.index) {
+                                Some(top) if top.color() == card.color() => {
+                                    "Illegal move: tableau piles need alternating colors."
+                                        .to_string()
+                                }
+                                Some(top) if card.rank.value() + 1 != top.rank.value() => {
+                                    "Illegal move: tableau piles need one rank lower than the destination card."
+                                        .to_string()
+                                }
+                                _ => GENERIC.to_string(),
+                            }
+                        }
+                    }
+                    CursorArea::Foundation => match self.freecell.foundation_top(cur.index) {
+                        None if !card.rank.is_ace() => {
+                            "Illegal move: foundations start with an Ace.".to_string()
+                        }
+                        Some(top) if top.suit != card.suit => {
+                            "Illegal move: foundations only take the same suit, one rank up."
+                                .to_string()
+                        }
+                        Some(top) if card.rank.value() != top.rank.value() + 1 => {
+                            "Illegal move: foundations need the next rank up.".to_string()
+                        }
+                        _ => GENERIC.to_string(),
+                    },
+                    CursorArea::FreeCell => {
+                        if self.freecell.cell_card(cur.index).is_some() {
+                            "Illegal move: that free cell is already in use.".to_string()
+                        } else {
+                            GENERIC.to_string()
+                        }
+                    }
+                    _ => GENERIC.to_string(),
+                }
+            }
+            GameMode::SpiderMini => {
+                if sel.area != CursorArea::Tableau || cur.area != CursorArea::Tableau {
+                    return GENERIC.to_string();
+                }
+                let pile = &self.spider.tableau[sel.index];
+                let len = pile.len();
+                let Some(card) = (len >= sel.count).then(|| pile[len - sel.count]) else {
+                    return GENERIC.to_string();
+                };
+                match self.spider.tableau_top(cur.index) {
+                    Some(top) if card.rank.value() + 1 != top.rank.value() => {
+                        "Illegal move: tableau piles need one rank lower than the destination card (any suit)."
+                            .to_string()
+                    }
+                    _ => GENERIC.to_string(),
+                }
+            }
         }
     }
 
     fn pop_undo(&mut self) {
         match self.mode {
             GameMode::Klondike => {
-                self.undo_klondike.pop();
+                self.undo_klondike.pop_back();
             }
             GameMode::FreeCell => {
-                self.undo_freecell.pop();
+                self.undo_freecell.pop_back();
             }
             GameMode::SpiderMini => {
-                self.undo_spider.pop();
+                self.undo_spider.pop_back();
             }
         }
     }
@@ -1146,5 +1292,66 @@ mod tests {
         assert_eq!(app.mode, GameMode::SpiderMini);
         assert_eq!(app.difficulty, Difficulty::Easy);
         assert_eq!(app.spider.suits, SpiderSuits::One);
+    }
+
+    #[test]
+    fn hard_mode_exhausted_draw_keeps_undo_snapshot() {
+        // Regression: a draw that exhausts Hard-mode redeals mutates
+        // klondike.game_over even though draw_from_stock() returns false.
+        // The pre-draw undo snapshot must survive so `u` restores the state
+        // right before this draw, not the one before that.
+        let mut app = App::new(DrawMode::Draw3, Difficulty::Hard);
+        app.mode = GameMode::Klondike;
+        while !app.klondike.stock.is_empty() {
+            app.draw();
+        }
+        for _ in 0..3 {
+            app.draw(); // redeal
+            while !app.klondike.stock.is_empty() {
+                app.draw();
+            }
+        }
+        assert!(!app.klondike.can_redeal());
+
+        let depth_before = app.undo_depth();
+        let waste_before = app.klondike.waste.clone();
+        app.draw(); // 4th redeal attempt: refused, sets game_over
+        assert!(app.klondike.is_game_over());
+        assert_eq!(
+            app.undo_depth(),
+            depth_before + 1,
+            "the pre-draw snapshot must be kept, not discarded"
+        );
+
+        app.undo();
+        assert!(!app.klondike.is_game_over());
+        assert_eq!(app.klondike.waste, waste_before);
+    }
+
+    #[test]
+    fn quit_new_game_and_restart_require_confirmation() {
+        let mut app = App::new(DrawMode::Draw3, Difficulty::Normal);
+        app.screen = Screen::Game;
+
+        app.request_quit();
+        assert!(!app.should_quit, "quit must wait for confirmation");
+        assert_eq!(app.confirm, Some(PendingConfirm::Quit));
+        app.cancel_pending();
+        assert!(!app.should_quit);
+        assert!(app.confirm.is_none());
+
+        app.request_quit();
+        app.confirm_pending();
+        assert!(app.should_quit);
+
+        let before = app.klondike.tableau.clone();
+        app.request_new_game();
+        assert_eq!(app.klondike.tableau, before, "cancel must not touch state");
+        app.cancel_pending();
+        assert_eq!(app.klondike.tableau, before);
+
+        app.request_restart();
+        app.confirm_pending();
+        assert!(app.confirm.is_none());
     }
 }

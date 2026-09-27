@@ -7,7 +7,7 @@
 //! - Hard: draw-3, limited stock redeals (`max_passes`, default 3);
 //!   refusing a redeal ends the game.
 
-use crate::cards::{shuffled_deck, Card, Rank, Suit};
+use crate::cards::{is_valid_descending_alternating_run, shuffled_deck, Card, Rank, Suit};
 
 /// Draw mode for Klondike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,7 +20,7 @@ pub enum DrawMode {
 }
 
 /// Difficulty level: controls redeal limits (and the recommended draw mode).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Difficulty {
     #[default]
     Easy,
@@ -29,7 +29,10 @@ pub enum Difficulty {
 }
 
 impl Difficulty {
-    /// Recommended draw mode per difficulty.
+    /// Recommended draw mode per difficulty. Documents the mapping (and
+    /// guards it with a test); draw mode is otherwise chosen independently
+    /// via `--draw`, not derived from difficulty in production.
+    #[cfg(test)]
     pub fn recommended_draw_mode(self) -> DrawMode {
         match self {
             Difficulty::Easy => DrawMode::Draw1,
@@ -136,7 +139,10 @@ impl KlondikeGame {
         game
     }
 
-    /// New game with a winnable-slanted deal (Easy-mode helper).
+    /// New game with a winnable-slanted deal. Test-only constructor;
+    /// production reaches the same deal via `reset_winnable` on an
+    /// existing game (see `App::new_game`).
+    #[cfg(test)]
     pub fn new_winnable(draw_mode: DrawMode, difficulty: Difficulty) -> Self {
         let mut game = Self::empty(draw_mode, difficulty, true);
         game.reset_winnable();
@@ -169,12 +175,15 @@ impl KlondikeGame {
         }
     }
 
-    /// Configure the Hard-mode redeal allowance (default 3).
+    /// Configure the Hard-mode redeal allowance (default 3). Test-only;
+    /// production always uses `Difficulty::default_max_passes`.
+    #[cfg(test)]
     pub fn with_max_passes(mut self, n: u32) -> Self {
         self.max_passes = n;
         self
     }
 
+    #[cfg(test)]
     pub fn set_max_passes(&mut self, n: u32) {
         self.max_passes = n;
     }
@@ -234,14 +243,19 @@ impl KlondikeGame {
         self.moves
     }
 
+    /// Test-only introspection; production reads `redeals_remaining` instead.
+    #[cfg(test)]
     pub fn redeals_used(&self) -> u32 {
         self.redeals_used
     }
 
+    #[cfg(test)]
     pub fn max_passes(&self) -> u32 {
         self.max_passes
     }
 
+    /// Test-only introspection; production doesn't currently surface this.
+    #[cfg(test)]
     pub fn is_winnable_deal(&self) -> bool {
         self.winnable_deal
     }
@@ -365,12 +379,7 @@ impl KlondikeGame {
 
     /// Check a moving stack is a valid face-up alternating-descending sequence.
     pub fn is_valid_tableau_sequence(cards: &[Card]) -> bool {
-        if cards.is_empty() || cards.iter().any(|c| !c.face_up) {
-            return false;
-        }
-        cards
-            .windows(2)
-            .all(|w| w[0].color() != w[1].color() && w[0].rank.value() == w[1].rank.value() + 1)
+        is_valid_descending_alternating_run(cards)
     }
 
     /// Index of the first face-up card in a tableau pile (start of the
@@ -571,7 +580,10 @@ impl KlondikeGame {
         self.foundations.iter().map(|f| f.len()).sum::<usize>() == 52
     }
 
-    /// True when at least one legal action exists (any move, draw, or redeal).
+    /// True when at least one legal action exists (any move, draw, or
+    /// redeal). Test-only; production relies on `hint_text` returning `None`
+    /// to signal "no move found" instead.
+    #[cfg(test)]
     pub fn has_legal_moves(&self) -> bool {
         if self.is_won() || self.game_over {
             return false;

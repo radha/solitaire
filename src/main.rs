@@ -30,16 +30,8 @@ struct Cli {
     draw: u8,
 
     /// Difficulty: easy, normal, hard.
-    #[arg(long, default_value = "normal")]
-    difficulty: String,
-}
-
-fn parse_difficulty(s: &str) -> Difficulty {
-    match s.to_lowercase().as_str() {
-        "easy" => Difficulty::Easy,
-        "hard" => Difficulty::Hard,
-        _ => Difficulty::Normal,
-    }
+    #[arg(long, value_enum, default_value_t = Difficulty::Normal)]
+    difficulty: Difficulty,
 }
 
 fn main() -> AnyhowResult {
@@ -49,7 +41,7 @@ fn main() -> AnyhowResult {
     } else {
         DrawMode::Draw3
     };
-    let difficulty = parse_difficulty(&cli.difficulty);
+    let difficulty = cli.difficulty;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -119,7 +111,16 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
 
-    // Game screen.
+    // Game screen: a pending destructive-action confirmation takes over all
+    // keys until it's resolved.
+    if app.confirm.is_some() {
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.confirm_pending(),
+            _ => app.cancel_pending(),
+        }
+        return;
+    }
+
     match code {
         KeyCode::Char('q') | KeyCode::Esc => {
             if app.show_help {
@@ -127,7 +128,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             } else if app.selected.is_some() {
                 app.cancel_selection();
             } else {
-                app.quit();
+                app.request_quit();
             }
         }
         KeyCode::Char('m') => app.open_menu(),
@@ -150,8 +151,8 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('u') => app.undo(),
         // 'h' is cursor-left, so hint lives on shift-H.
         KeyCode::Char('H') => app.hint(),
-        KeyCode::Char('n') => app.new_game(),
-        KeyCode::Char('r') => app.restart(),
+        KeyCode::Char('n') => app.request_new_game(),
+        KeyCode::Char('r') => app.request_restart(),
         KeyCode::Char('s') => app.focus_stock(),
         KeyCode::Char('w') => app.focus_waste(),
         KeyCode::Char('f') => app.focus_foundation(),

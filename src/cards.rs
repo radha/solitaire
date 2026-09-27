@@ -1,7 +1,7 @@
 //! Core card types shared by all solitaire variants.
 
+use rand::rng;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 use std::fmt;
 
 /// Card suit.
@@ -53,11 +53,18 @@ impl Suit {
 pub struct Rank(pub u8);
 
 impl Rank {
+    #[cfg(test)]
     pub const ACE: Rank = Rank(1);
+    #[cfg(test)]
     pub const JACK: Rank = Rank(11);
+    #[cfg(test)]
     pub const QUEEN: Rank = Rank(12);
+    #[cfg(test)]
     pub const KING: Rank = Rank(13);
 
+    /// Validated constructor: only used by tests today (production code
+    /// builds ranks directly, e.g. `Rank(v)` in a known-valid 1..=13 loop).
+    #[cfg(test)]
     pub fn new(v: u8) -> Option<Rank> {
         if (1..=13).contains(&v) {
             Some(Rank(v))
@@ -116,6 +123,9 @@ impl Card {
         }
     }
 
+    /// Test-only convenience constructor; production code builds cards
+    /// face-down (via `new`) and flips them via `deal_from`/draw logic.
+    #[cfg(test)]
     pub fn new_face_up(suit: Suit, rank: Rank) -> Self {
         Self {
             suit,
@@ -130,14 +140,6 @@ impl Card {
 
     pub fn color(&self) -> CardColor {
         self.suit.color()
-    }
-
-    pub fn is_ace(&self) -> bool {
-        self.rank.is_ace()
-    }
-
-    pub fn is_king(&self) -> bool {
-        self.rank.is_king()
     }
 
     /// Face-up render like `A♠`, `10♦`. Face-down cards render as the back.
@@ -175,8 +177,19 @@ pub fn full_deck() -> Vec<Card> {
 /// Shuffled 52-card deck.
 pub fn shuffled_deck() -> Vec<Card> {
     let mut deck = full_deck();
-    deck.shuffle(&mut thread_rng());
+    deck.shuffle(&mut rng());
     deck
+}
+
+/// A movable stack must be face-up and strictly descending with alternating
+/// colors. Shared by Klondike and FreeCell tableau-run validation.
+pub fn is_valid_descending_alternating_run(cards: &[Card]) -> bool {
+    if cards.is_empty() || cards.iter().any(|c| !c.face_up) {
+        return false;
+    }
+    cards
+        .windows(2)
+        .all(|w| w[0].color() != w[1].color() && w[0].rank.value() == w[1].rank.value() + 1)
 }
 
 #[cfg(test)]

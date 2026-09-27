@@ -10,8 +10,8 @@
 //!   empty (classic rule). 5 deals total from a 104-card deck.
 //! - Difficulty = suits in play: Easy = 1, Normal = 2, Hard = 4.
 
+use rand::rng;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 
 use crate::cards::{Card, Rank, Suit};
 use crate::klondike::Difficulty;
@@ -116,7 +116,7 @@ impl SpiderGame {
     /// 5), tops face-up, remaining 50 form the stock (5 deals of 10).
     pub fn reset(&mut self) {
         let mut deck = build_deck(self.suits);
-        deck.shuffle(&mut thread_rng());
+        deck.shuffle(&mut rng());
         for pile in &mut self.tableau {
             pile.clear();
         }
@@ -302,30 +302,6 @@ impl SpiderGame {
         self.moves += 1;
         self.auto_remove_completed();
         true
-    }
-
-    /// True when at least one legal action exists (a tableau move or a deal).
-    pub fn has_legal_moves(&self) -> bool {
-        if self.is_won() {
-            return false;
-        }
-        if self.can_deal() {
-            return true;
-        }
-        for from in 0..10 {
-            let run = self.movable_run_len(from);
-            if run == 0 {
-                continue;
-            }
-            let len = self.tableau[from].len();
-            for count in 1..=run {
-                let bottom = self.tableau[from][len - count];
-                if (0..10).any(|to| to != from && self.can_place_on_tableau(bottom, to)) {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Suggest the next move as human-readable text.

@@ -9,7 +9,7 @@
 //!   `max = (1 + free_cells) * 2^(empty_columns excluding destination)`.
 //! - Difficulty selects the freecell count: Easy = 5, Normal = 4, Hard = 3.
 
-use crate::cards::{shuffled_deck, Card};
+use crate::cards::{is_valid_descending_alternating_run, shuffled_deck, Card};
 use crate::klondike::Difficulty;
 
 /// Maximum freecell slots (Easy uses 5, so the array is bigger than 4).
@@ -30,7 +30,6 @@ pub struct FreeCellGame {
     pub num_cells: usize,
     pub foundations: [Vec<Card>; 4],
     pub tableau: [Vec<Card>; 8],
-    pub difficulty: Difficulty,
     score: i32,
     moves: u32,
     win_bonus_awarded: bool,
@@ -62,29 +61,12 @@ impl FreeCellGame {
                 Vec::new(),
                 Vec::new(),
             ],
-            difficulty,
             score: 0,
             moves: 0,
             win_bonus_awarded: false,
         };
         game.reset();
         game
-    }
-
-    /// Change difficulty (freecell count). Refused (`false`) when shrinking
-    /// would strand an occupied cell; the game is left untouched then.
-    pub fn set_difficulty(&mut self, difficulty: Difficulty) -> bool {
-        let want = cell_count_for(difficulty);
-        if want < self.num_cells
-            && self.freecells[want..self.num_cells]
-                .iter()
-                .any(|c| c.is_some())
-        {
-            return false;
-        }
-        self.difficulty = difficulty;
-        self.num_cells = want;
-        true
     }
 
     /// Deal all 52 cards face-up across the 8 tableau columns.
@@ -174,12 +156,7 @@ impl FreeCellGame {
 
     /// A movable stack must be a face-up alternating-descending sequence.
     pub fn is_valid_sequence(cards: &[Card]) -> bool {
-        if cards.is_empty() || cards.iter().any(|c| !c.face_up) {
-            return false;
-        }
-        cards
-            .windows(2)
-            .all(|w| w[0].color() != w[1].color() && w[0].rank.value() == w[1].rank.value() + 1)
+        is_valid_descending_alternating_run(cards)
     }
 
     /// Largest movable suffix length of a tableau pile (whole valid run).
@@ -264,28 +241,6 @@ impl FreeCellGame {
                 self.tableau[from].pop();
                 self.foundations[f].push(card);
                 self.on_foundation_move();
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Tableau top card -> first empty freecell.
-    pub fn move_tableau_to_cell(&mut self, from: usize) -> bool {
-        if from >= 8 || self.free_count() == 0 {
-            return false;
-        }
-        let card = match self.tableau_top(from) {
-            Some(c) => c,
-            None => return false,
-        };
-        let cell = (0..self.num_cells).find(|&i| self.freecells[i].is_none());
-        match cell {
-            Some(i) => {
-                self.tableau[from].pop();
-                self.freecells[i] = Some(card);
-                self.score += SCORE_CELL_MOVE;
-                self.moves += 1;
                 true
             }
             None => false,
@@ -470,46 +425,6 @@ impl FreeCellGame {
             }
         }
         moved
-    }
-
-    /// True when at least one legal action exists.
-    pub fn has_legal_moves(&self) -> bool {
-        if self.is_won() {
-            return false;
-        }
-        for t in 0..8 {
-            if let Some(c) = self.tableau_top(t) {
-                if (0..4).any(|f| self.can_place_on_foundation(c, f)) {
-                    return true;
-                }
-                if self.free_count() > 0 {
-                    return true;
-                }
-                let len = self.tableau[t].len();
-                let cap = self.max_movable(t);
-                for count in 1..=len.min(cap).max(1).min(len) {
-                    let start = len - count;
-                    if !Self::is_valid_sequence(&self.tableau[t][start..]) {
-                        continue;
-                    }
-                    let bottom = self.tableau[t][start];
-                    if (0..8).any(|d| d != t && self.can_place_on_tableau(bottom, d)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        for c in 0..self.num_cells {
-            if let Some(card) = self.cell_card(c) {
-                if (0..4).any(|f| self.can_place_on_foundation(card, f)) {
-                    return true;
-                }
-                if (0..8).any(|t| self.can_place_on_tableau(card, t)) {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Suggest the next move as human-readable text.

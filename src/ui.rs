@@ -153,18 +153,20 @@ enum PileState {
 }
 
 /// Border/label state for a pile: grabbed source first, then legal target,
-/// then cursor, otherwise plain.
-fn pile_state(app: &App, area: CursorArea, index: usize) -> PileState {
+/// then cursor, otherwise plain. `targets` is `app.legal_targets()`, computed
+/// once per frame by the caller rather than once per pile.
+fn pile_state(
+    app: &App,
+    targets: &[(CursorArea, usize)],
+    area: CursorArea,
+    index: usize,
+) -> PileState {
     if let Some(sel) = app.selected {
         if sel.area == area && sel.index == index {
             return PileState::Grabbed;
         }
     }
-    if app
-        .legal_targets()
-        .iter()
-        .any(|&(a, i)| a == area && i == index)
-    {
+    if targets.iter().any(|&(a, i)| a == area && i == index) {
         return PileState::Target;
     }
     if app.cursor.area == area && app.cursor.index == index {
@@ -649,6 +651,9 @@ fn render_game(frame: &mut Frame, app: &App) {
     render_toolbar(buf, Rect::new(area.x, area.y + 1, area.width, 1), app);
     render_info_strip(buf, Rect::new(area.x, area.y + 2, area.width, 1), app);
 
+    // Computed once per frame rather than once per pile widget.
+    let targets = app.legal_targets();
+
     let top_y = area.y + 3;
     let top_h = CARD_H + 1;
     let tab_y = top_y + top_h;
@@ -656,15 +661,24 @@ fn render_game(frame: &mut Frame, app: &App) {
     let status_y = area.bottom().saturating_sub(1);
 
     match app.mode {
-        GameMode::Klondike => {
-            render_klondike_top(buf, app, Rect::new(area.x, top_y, area.width, top_h))
-        }
-        GameMode::FreeCell => {
-            render_freecell_top(buf, app, Rect::new(area.x, top_y, area.width, top_h))
-        }
-        GameMode::SpiderMini => {
-            render_spider_top(buf, app, Rect::new(area.x, top_y, area.width, top_h))
-        }
+        GameMode::Klondike => render_klondike_top(
+            buf,
+            app,
+            &targets,
+            Rect::new(area.x, top_y, area.width, top_h),
+        ),
+        GameMode::FreeCell => render_freecell_top(
+            buf,
+            app,
+            &targets,
+            Rect::new(area.x, top_y, area.width, top_h),
+        ),
+        GameMode::SpiderMini => render_spider_top(
+            buf,
+            app,
+            &targets,
+            Rect::new(area.x, top_y, area.width, top_h),
+        ),
     }
 
     let tab_h = msg_y.saturating_sub(tab_y + 1);
@@ -673,6 +687,7 @@ fn render_game(frame: &mut Frame, app: &App) {
             GameMode::Klondike => render_fans(
                 buf,
                 app,
+                &targets,
                 Rect::new(area.x, tab_y, area.width, tab_h),
                 &app.klondike.tableau,
                 9,
@@ -680,6 +695,7 @@ fn render_game(frame: &mut Frame, app: &App) {
             GameMode::FreeCell => render_fans(
                 buf,
                 app,
+                &targets,
                 Rect::new(area.x, tab_y, area.width, tab_h),
                 &app.freecell.tableau,
                 9,
@@ -687,6 +703,7 @@ fn render_game(frame: &mut Frame, app: &App) {
             GameMode::SpiderMini => render_fans(
                 buf,
                 app,
+                &targets,
                 Rect::new(area.x, tab_y, area.width, tab_h),
                 &app.spider.tableau,
                 7,
@@ -730,14 +747,14 @@ fn center_slots(area: Rect, n: usize, w: u16) -> Vec<u16> {
 
 // ---- top rows ----
 
-fn render_klondike_top(buf: &mut Buffer, app: &App, area: Rect) {
+fn render_klondike_top(buf: &mut Buffer, app: &App, targets: &[(CursorArea, usize)], area: Rect) {
     let w: u16 = 9;
     let xs = center_slots(area, 6, w);
     if xs.len() < 6 {
         return;
     }
     // Stock.
-    let stock_state = pile_state(app, CursorArea::Stock, 0);
+    let stock_state = pile_state(app, targets, CursorArea::Stock, 0);
     if app.klondike.stock.is_empty() {
         let ghost = if app.klondike.waste.is_empty() {
             "·"
@@ -757,7 +774,7 @@ fn render_klondike_top(buf: &mut Buffer, app: &App, area: Rect) {
         stock_state,
     );
     // Waste.
-    let waste_state = pile_state(app, CursorArea::Waste, 0);
+    let waste_state = pile_state(app, targets, CursorArea::Waste, 0);
     paint_pile_card(
         buf,
         xs[1],
@@ -770,7 +787,7 @@ fn render_klondike_top(buf: &mut Buffer, app: &App, area: Rect) {
     paint_caption(buf, xs[1], area.y + CARD_H, w, "Waste", waste_state);
     // Foundations.
     for f in 0..4 {
-        let state = pile_state(app, CursorArea::Foundation, f);
+        let state = pile_state(app, targets, CursorArea::Foundation, f);
         paint_pile_card(
             buf,
             xs[2 + f],
@@ -791,7 +808,7 @@ fn render_klondike_top(buf: &mut Buffer, app: &App, area: Rect) {
     }
 }
 
-fn render_freecell_top(buf: &mut Buffer, app: &App, area: Rect) {
+fn render_freecell_top(buf: &mut Buffer, app: &App, targets: &[(CursorArea, usize)], area: Rect) {
     let n = app.freecell.num_cells + 4;
     let w: u16 = if n > 7 { 7 } else { 9 };
     let xs = center_slots(area, n, w);
@@ -799,7 +816,7 @@ fn render_freecell_top(buf: &mut Buffer, app: &App, area: Rect) {
         return;
     }
     for (c, &x) in xs.iter().enumerate().take(app.freecell.num_cells) {
-        let state = pile_state(app, CursorArea::FreeCell, c);
+        let state = pile_state(app, targets, CursorArea::FreeCell, c);
         paint_pile_card(
             buf,
             x,
@@ -812,7 +829,7 @@ fn render_freecell_top(buf: &mut Buffer, app: &App, area: Rect) {
         paint_caption(buf, x, area.y + CARD_H, w, &format!("C{}", c + 1), state);
     }
     for f in 0..4 {
-        let state = pile_state(app, CursorArea::Foundation, f);
+        let state = pile_state(app, targets, CursorArea::Foundation, f);
         paint_pile_card(
             buf,
             xs[app.freecell.num_cells + f],
@@ -833,7 +850,7 @@ fn render_freecell_top(buf: &mut Buffer, app: &App, area: Rect) {
     }
 }
 
-fn render_spider_top(buf: &mut Buffer, app: &App, area: Rect) {
+fn render_spider_top(buf: &mut Buffer, app: &App, targets: &[(CursorArea, usize)], area: Rect) {
     let w: u16 = 9;
     let xs = center_slots(area, 3, w);
     if xs.len() < 3 {
@@ -848,7 +865,7 @@ fn render_spider_top(buf: &mut Buffer, app: &App, area: Rect) {
         return;
     }
     // Stock deals remaining, shown as a card back with a count caption.
-    let state = pile_state(app, CursorArea::Stock, 0);
+    let state = pile_state(app, targets, CursorArea::Stock, 0);
     if app.spider.stock_deals_remaining() == 0 {
         paint_slot(buf, xs[0], area.y, w, "·", ring_color(state));
     } else {
@@ -886,7 +903,14 @@ fn render_spider_top(buf: &mut Buffer, app: &App, area: Rect) {
 // ---- tableau fans ----
 
 /// Render tableau columns as overlapping desktop-style card fans.
-fn render_fans(buf: &mut Buffer, app: &App, area: Rect, piles: &[Vec<Card>], card_w: u16) {
+fn render_fans(
+    buf: &mut Buffer,
+    app: &App,
+    targets: &[(CursorArea, usize)],
+    area: Rect,
+    piles: &[Vec<Card>],
+    card_w: u16,
+) {
     let n = piles.len();
     let xs = center_slots(area, n, card_w);
     if xs.len() < n || area.height < 3 {
@@ -903,7 +927,7 @@ fn render_fans(buf: &mut Buffer, app: &App, area: Rect, piles: &[Vec<Card>], car
 
     for (i, pile) in piles.iter().enumerate() {
         let x = xs[i];
-        let col_state = pile_state(app, CursorArea::Tableau, i);
+        let col_state = pile_state(app, targets, CursorArea::Tableau, i);
         // Header: keyboard number for the column, highlighted on focus.
         let key = if piles.len() == 10 {
             if i == 9 {
