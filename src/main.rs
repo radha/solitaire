@@ -1,9 +1,11 @@
-//! Solitaire TUI — binary entry point.
+//! Solitaire TUI — binary entry point: CLI, terminal setup, event loop and
+//! key bindings.
 
 mod app;
 mod cards;
 mod freecell;
 mod klondike;
+mod rules;
 mod spider;
 mod ui;
 
@@ -11,164 +13,173 @@ use std::io;
 use std::time::Duration;
 
 use clap::Parser;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use crossterm::execute;
+use ratatui::DefaultTerminal;
 
-use app::{App, Dir, GameMode, Screen};
-use klondike::{Difficulty, DrawMode};
+use app::{Action, App, CursorArea, Dir, GameMode, Screen};
+use klondike::DrawMode;
+use rules::Difficulty;
 
-/// TUI Solitaire: Klondike, FreeCell, Spider-mini.
+/// Play Klondike, FreeCell and Spider in the terminal.
 #[derive(Parser, Debug)]
-#[command(name = "solitaire", version, about = "Play solitaire in the terminal")]
+#[command(name = "solitaire", version, about)]
 struct Cli {
-    /// Draw mode for Klondike: 1 or 3.
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8))]
-    draw: u8,
+    /// Klondike draw count [default: 1 on Easy, 3 otherwise].
+    #[arg(long, value_enum)]
+    draw: Option<DrawMode>,
 
-    /// Difficulty: easy, normal, hard.
+    /// Starting difficulty for every game.
     #[arg(long, value_enum, default_value_t = Difficulty::Normal)]
     difficulty: Difficulty,
+
+    /// Deal number for the first game (replays a specific layout).
+    #[arg(long)]
+    deal: Option<u32>,
 }
 
-fn main() -> AnyhowResult {
+fn main() -> io::Result<()> {
     let cli = Cli::parse();
-    let draw_mode = if cli.draw == 1 {
-        DrawMode::Draw1
-    } else {
-        DrawMode::Draw3
-    };
-    let difficulty = cli.difficulty;
+    let mut app = App::new(cli.difficulty, cli.draw, cli.deal);
+    app.truecolor = supports_truecolor();
 
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // `ratatui::init` enables raw mode + the alternate screen and installs a
+    // panic hook that restores them; chain mouse-capture cleanup onto it.
+    let mut terminal = ratatui::init();
+    let restore_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        restore_hook(info);
+    }));
 
-    let mut app = App::new(draw_mode, difficulty);
-    let result = run(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    if let Err(e) = result {
-        eprintln!("error: {e}");
-    }
-    Ok(())
+    let result =
+        execute!(io::stdout(), EnableMouseCapture).and_then(|()| run(&mut terminal, &mut app));
+    let _ = execute!(io::stdout(), DisableMouseCapture);
+    ratatui::restore();
+    result
 }
 
-type AnyhowResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+/// Whether the terminal advertises 24-bit color.
+fn supports_truecolor() -> bool {
+    std::env::var("COLORTERM").is_ok_and(|v| v == "truecolor" || v == "24bit")
+        || std::env::var_os("WT_SESSION").is_some()
+}
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> AnyhowResult {
+fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     while !app.should_quit {
-        terminal.draw(|f| ui::render(f, app))?;
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                handle_key(app, key.code, key.modifiers);
+        app.tick();
+        let mut hits = Vec::new();
+        terminal.draw(|f| hits = ui::render(f, app))?;
+        app.hits = hits;
+        // Sleep until input arrives or the clock reaches its next second.
+        let to_next_second = 1000 - u64::from(app.elapsed().subsec_millis());
+        if event::poll(Duration::from_millis(to_next_second.max(20)))? {
+            handle_event(app, &event::read()?);
+            // Drain anything else queued before redrawing.
+            while !app.should_quit && event::poll(Duration::ZERO)? {
+                handle_event(app, &event::read()?);
             }
         }
     }
     Ok(())
 }
 
-fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-    // Menu screen has its own bindings.
-    if app.screen == Screen::Menu {
-        match code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                if app.show_help {
-                    app.show_help = false;
-                } else {
-                    app.screen = Screen::Game;
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => app.menu_move(Dir::Up),
-            KeyCode::Down | KeyCode::Char('j') => app.menu_move(Dir::Down),
-            KeyCode::Left | KeyCode::Char('h') => app.menu_move(Dir::Left),
-            KeyCode::Right | KeyCode::Char('l') => app.menu_move(Dir::Right),
-            KeyCode::Enter | KeyCode::Char(' ') => app.menu_confirm(),
-            KeyCode::Char('?') => app.toggle_help(),
-            KeyCode::Char('m') => app.screen = Screen::Game,
-            KeyCode::Char('1') => {
-                app.menu_index = 0;
-                app.menu_confirm();
-            }
-            KeyCode::Char('2') => {
-                app.menu_index = 1;
-                app.menu_confirm();
-            }
-            KeyCode::Char('3') => {
-                app.menu_index = 2;
-                app.menu_confirm();
-            }
+fn handle_event(app: &mut App, event: &Event) {
+    match event {
+        // Only presses: Windows also reports releases, which would double
+        // every action.
+        Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, *key),
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => app.click(mouse.column, mouse.row, false),
+            MouseEventKind::Down(MouseButton::Right) => app.click(mouse.column, mouse.row, true),
             _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn handle_key(app: &mut App, key: KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if matches!(key.code, KeyCode::Char('c' | 'q')) {
+            app.should_quit = true;
         }
         return;
     }
-
-    // Game screen: a pending destructive-action confirmation takes over all
-    // keys until it's resolved.
+    // A pending destructive-action confirmation takes over all keys.
     if app.confirm.is_some() {
-        match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.confirm_pending(),
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => app.confirm_pending(),
             _ => app.cancel_pending(),
         }
         return;
     }
+    if app.show_help {
+        app.show_help = false;
+        return;
+    }
+    match app.screen {
+        Screen::Menu => menu_key(app, key.code),
+        Screen::Game => game_key(app, key.code),
+    }
+}
 
+fn menu_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('q' | 'm') | KeyCode::Esc => app.close_menu(),
+        KeyCode::Up | KeyCode::Char('k') => app.menu_move(Dir::Up),
+        KeyCode::Down | KeyCode::Char('j') => app.menu_move(Dir::Down),
+        KeyCode::Left | KeyCode::Char('h') => app.menu_move(Dir::Left),
+        KeyCode::Right | KeyCode::Char('l') => app.menu_move(Dir::Right),
+        KeyCode::Enter | KeyCode::Char(' ') => app.menu_confirm(),
+        KeyCode::Char('d') => app.menu_toggle_draw(),
+        KeyCode::Char('?') => app.perform(Action::Help),
+        KeyCode::Char(c @ '1'..='3') => {
+            app.menu.game = GameMode::ALL[usize::from(c as u8 - b'1')];
+        }
+        _ => {}
+    }
+}
+
+fn game_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('q') | KeyCode::Esc => {
-            if app.show_help {
-                app.show_help = false;
-            } else if app.selected.is_some() {
+            if app.selected.is_some() {
                 app.cancel_selection();
             } else {
-                app.request_quit();
+                app.perform(Action::Quit);
             }
         }
-        KeyCode::Char('m') => app.open_menu(),
-        KeyCode::Char('?') => app.toggle_help(),
+        KeyCode::Char('m') => app.perform(Action::Menu),
+        KeyCode::Char('?') => app.perform(Action::Help),
+        KeyCode::Char('n') => app.perform(Action::New),
+        KeyCode::Char('r') => app.perform(Action::Restart),
+        KeyCode::Char('u') => app.perform(Action::Undo),
+        KeyCode::Char('d') => app.perform(Action::Draw),
+        KeyCode::Char('a') => app.perform(Action::Auto),
+        // 'h' is cursor-left, so hint lives on shift-H.
+        KeyCode::Char('H') => app.perform(Action::Hint),
+        KeyCode::Char('F') => app.send_to_foundation(),
         KeyCode::Left | KeyCode::Char('h') => app.move_cursor(Dir::Left),
         KeyCode::Right | KeyCode::Char('l') => app.move_cursor(Dir::Right),
         KeyCode::Up | KeyCode::Char('k') => app.move_cursor(Dir::Up),
         KeyCode::Down | KeyCode::Char('j') => app.move_cursor(Dir::Down),
-        KeyCode::Tab => {
-            if mods.contains(KeyModifiers::SHIFT) {
-                app.tab_prev();
-            } else {
-                app.tab_next();
-            }
-        }
+        KeyCode::Tab => app.tab_next(),
         KeyCode::BackTab => app.tab_prev(),
         KeyCode::Char(' ') | KeyCode::Enter => app.select_or_place(),
-        KeyCode::Char('d') => app.draw(),
-        KeyCode::Char('a') => app.auto_foundation(),
-        KeyCode::Char('u') => app.undo(),
-        // 'h' is cursor-left, so hint lives on shift-H.
-        KeyCode::Char('H') => app.hint(),
-        KeyCode::Char('n') => app.request_new_game(),
-        KeyCode::Char('r') => app.request_restart(),
-        KeyCode::Char('s') => app.focus_stock(),
-        KeyCode::Char('w') => app.focus_waste(),
-        KeyCode::Char('f') => app.focus_foundation(),
-        KeyCode::Char('c') => app.focus_cells(),
-        KeyCode::Char('t') => app.jump_to_tableau(0),
-        KeyCode::Char('1') => app.jump_to_tableau(0),
-        KeyCode::Char('2') => app.jump_to_tableau(1),
-        KeyCode::Char('3') => app.jump_to_tableau(2),
-        KeyCode::Char('4') => app.jump_to_tableau(3),
-        KeyCode::Char('5') => app.jump_to_tableau(4),
-        KeyCode::Char('6') => app.jump_to_tableau(5),
-        KeyCode::Char('7') => app.jump_to_tableau(6),
-        KeyCode::Char('8') => app.jump_to_tableau(7),
-        KeyCode::Char('9') => app.jump_to_tableau(8),
-        KeyCode::Char('0') => app.jump_to_tableau(9),
+        KeyCode::Char('+' | '=') => app.adjust_grab(true),
+        KeyCode::Char('-' | '_') => app.adjust_grab(false),
+        KeyCode::Char('s') => app.focus(CursorArea::Stock, 0),
+        KeyCode::Char('w') => app.focus(CursorArea::Waste, 0),
+        KeyCode::Char('f') => app.focus(CursorArea::Foundation, 0),
+        KeyCode::Char('c') => app.focus(CursorArea::FreeCell, 0),
+        KeyCode::Char('t') => app.focus(CursorArea::Tableau, 0),
+        KeyCode::Char('0') => app.focus(CursorArea::Tableau, 9),
+        KeyCode::Char(c @ '1'..='9') => {
+            app.focus(CursorArea::Tableau, usize::from(c as u8 - b'1'));
+        }
         _ => {}
     }
-    let _ = GameMode::Klondike; // keep import meaningful in all builds
 }

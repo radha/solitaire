@@ -1,7 +1,6 @@
-//! Core card types shared by all solitaire variants.
+//! Core card types shared by all solitaire variants, plus the seeded
+//! shuffle that turns a deal number into a reproducible deck.
 
-use rand::rng;
-use rand::seq::SliceRandom;
 use std::fmt;
 
 /// Card suit.
@@ -21,9 +20,7 @@ pub enum CardColor {
 }
 
 impl Suit {
-    pub fn all() -> [Suit; 4] {
-        [Suit::Spades, Suit::Hearts, Suit::Diamonds, Suit::Clubs]
-    }
+    pub const ALL: [Suit; 4] = [Suit::Spades, Suit::Hearts, Suit::Diamonds, Suit::Clubs];
 
     pub fn is_red(self) -> bool {
         matches!(self, Suit::Hearts | Suit::Diamonds)
@@ -48,61 +45,46 @@ impl Suit {
     }
 }
 
-/// Card rank: Ace = 1 .. King = 13.
+/// Card rank: Ace = 1 .. King = 13. The field is private so every `Rank`
+/// in the program is in range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Rank(pub u8);
+pub struct Rank(u8);
 
 impl Rank {
-    #[cfg(test)]
     pub const ACE: Rank = Rank(1);
-    #[cfg(test)]
-    pub const JACK: Rank = Rank(11);
-    #[cfg(test)]
-    pub const QUEEN: Rank = Rank(12);
-    #[cfg(test)]
     pub const KING: Rank = Rank(13);
 
-    /// Validated constructor: only used by tests today (production code
-    /// builds ranks directly, e.g. `Rank(v)` in a known-valid 1..=13 loop).
+    /// Build a rank from its value (tests; production iterates
+    /// [`Rank::all`]). Panics outside 1..=13.
     #[cfg(test)]
-    pub fn new(v: u8) -> Option<Rank> {
-        if (1..=13).contains(&v) {
-            Some(Rank(v))
-        } else {
-            None
-        }
+    pub const fn new(value: u8) -> Rank {
+        assert!(value >= 1 && value <= 13, "rank out of range");
+        Rank(value)
+    }
+
+    /// Every rank, Ace to King.
+    pub fn all() -> impl Iterator<Item = Rank> {
+        (1..=13).map(Rank)
     }
 
     /// Numeric value 1..=13.
-    pub fn value(self) -> u8 {
+    pub const fn value(self) -> u8 {
         self.0
     }
 
     pub fn is_ace(self) -> bool {
-        self.0 == 1
+        self == Rank::ACE
     }
 
     pub fn is_king(self) -> bool {
-        self.0 == 13
+        self == Rank::KING
     }
 
     pub fn label(self) -> &'static str {
-        match self.0 {
-            1 => "A",
-            11 => "J",
-            12 => "Q",
-            13 => "K",
-            2 => "2",
-            3 => "3",
-            4 => "4",
-            5 => "5",
-            6 => "6",
-            7 => "7",
-            8 => "8",
-            9 => "9",
-            10 => "10",
-            _ => "?",
-        }
+        const LABELS: [&str; 13] = [
+            "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K",
+        ];
+        LABELS[usize::from(self.0 - 1)]
     }
 }
 
@@ -115,7 +97,8 @@ pub struct Card {
 }
 
 impl Card {
-    pub fn new(suit: Suit, rank: Rank) -> Self {
+    /// A face-down card.
+    pub const fn new(suit: Suit, rank: Rank) -> Self {
         Self {
             suit,
             rank,
@@ -123,78 +106,104 @@ impl Card {
         }
     }
 
-    /// Test-only convenience constructor; production code builds cards
-    /// face-down (via `new`) and flips them via `deal_from`/draw logic.
+    /// Test-only face-up constructor taking a raw rank value.
     #[cfg(test)]
-    pub fn new_face_up(suit: Suit, rank: Rank) -> Self {
+    pub const fn up(suit: Suit, value: u8) -> Self {
         Self {
             suit,
-            rank,
+            rank: Rank::new(value),
             face_up: true,
         }
     }
 
-    pub fn is_red(&self) -> bool {
+    pub fn is_red(self) -> bool {
         self.suit.is_red()
     }
 
-    pub fn color(&self) -> CardColor {
+    pub fn color(self) -> CardColor {
         self.suit.color()
-    }
-
-    /// Face-up render like `A♠`, `10♦`. Face-down cards render as the back.
-    pub fn render(&self) -> String {
-        if self.face_up {
-            format!("{}{}", self.rank.label(), self.suit.symbol())
-        } else {
-            Self::back_str().to_string()
-        }
-    }
-
-    /// Card-back render for face-down / stock cards.
-    pub fn back_str() -> &'static str {
-        "??"
     }
 }
 
+/// Face-up cards render like `A♠` / `10♦`; face-down cards render as `??`.
 impl fmt::Display for Card {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.render())
+        if self.face_up {
+            write!(f, "{}{}", self.rank.label(), self.suit.symbol())
+        } else {
+            f.write_str("??")
+        }
     }
 }
 
 /// Build a standard 52-card deck (face down).
 pub fn full_deck() -> Vec<Card> {
-    let mut deck = Vec::with_capacity(52);
-    for &suit in &Suit::all() {
-        for v in 1..=13 {
-            deck.push(Card::new(suit, Rank(v)));
-        }
-    }
+    Suit::ALL
+        .iter()
+        .flat_map(|&suit| Rank::all().map(move |rank| Card::new(suit, rank)))
+        .collect()
+}
+
+/// Shuffle a 52-card deck for deal number `deal`.
+pub fn shuffled_deck(deal: u32) -> Vec<Card> {
+    let mut deck = full_deck();
+    DealRng::new(deal).shuffle(&mut deck);
     deck
 }
 
-/// Shuffled 52-card deck.
-pub fn shuffled_deck() -> Vec<Card> {
-    let mut deck = full_deck();
-    deck.shuffle(&mut rng());
-    deck
+/// A fresh random deal number.
+pub fn random_deal() -> u32 {
+    rand::random()
+}
+
+/// Small deterministic PRNG (SplitMix64). Implemented here rather than
+/// taken from `rand` so a deal number reproduces the same shuffle forever,
+/// independent of the `rand` crate's algorithm choices across versions.
+pub struct DealRng(u64);
+
+impl DealRng {
+    pub fn new(deal: u32) -> Self {
+        Self(u64::from(deal))
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform index in `0..n` (multiply-shift; bias is negligible for
+    /// deck-sized `n`).
+    fn below(&mut self, n: usize) -> usize {
+        let wide = u128::from(self.next_u64()) * n as u128;
+        usize::try_from(wide >> 64).expect("index below n fits usize")
+    }
+
+    /// Fisher–Yates shuffle.
+    pub fn shuffle<T>(&mut self, items: &mut [T]) {
+        for i in (1..items.len()).rev() {
+            let j = self.below(i + 1);
+            items.swap(i, j);
+        }
+    }
 }
 
 /// A movable stack must be face-up and strictly descending with alternating
 /// colors. Shared by Klondike and FreeCell tableau-run validation.
 pub fn is_valid_descending_alternating_run(cards: &[Card]) -> bool {
-    if cards.is_empty() || cards.iter().any(|c| !c.face_up) {
-        return false;
-    }
-    cards
-        .windows(2)
-        .all(|w| w[0].color() != w[1].color() && w[0].rank.value() == w[1].rank.value() + 1)
+    !cards.is_empty()
+        && cards.iter().all(|c| c.face_up)
+        && cards
+            .windows(2)
+            .all(|w| w[0].color() != w[1].color() && w[0].rank.value() == w[1].rank.value() + 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn suit_symbols_and_colors() {
@@ -209,41 +218,42 @@ mod tests {
     }
 
     #[test]
-    fn card_string_render() {
-        let ace = Card::new_face_up(Suit::Spades, Rank::ACE);
-        assert_eq!(ace.render(), "A♠");
-        assert_eq!(ace.to_string(), "A♠");
-        let ten = Card::new_face_up(Suit::Diamonds, Rank(10));
-        assert_eq!(ten.render(), "10♦");
-        let king = Card::new_face_up(Suit::Hearts, Rank::KING);
-        assert_eq!(king.render(), "K♥");
-        let queen = Card::new_face_up(Suit::Clubs, Rank::QUEEN);
-        assert_eq!(queen.render(), "Q♣");
-    }
-
-    #[test]
-    fn card_back_render() {
-        let down = Card::new(Suit::Spades, Rank::ACE);
-        assert_eq!(down.render(), Card::back_str());
-        assert_eq!(down.to_string(), "??");
+    fn card_display() {
+        assert_eq!(Card::up(Suit::Spades, 1).to_string(), "A♠");
+        assert_eq!(Card::up(Suit::Diamonds, 10).to_string(), "10♦");
+        assert_eq!(Card::up(Suit::Hearts, 13).to_string(), "K♥");
+        assert_eq!(Card::up(Suit::Clubs, 12).to_string(), "Q♣");
+        assert_eq!(Card::new(Suit::Spades, Rank::ACE).to_string(), "??");
     }
 
     #[test]
     fn full_deck_has_52_unique_cards() {
         let deck = full_deck();
         assert_eq!(deck.len(), 52);
-        let mut seen = std::collections::HashSet::new();
-        for c in &deck {
-            assert!(seen.insert((c.suit, c.rank)), "duplicate card {c}");
-        }
+        let unique: HashSet<_> = deck.iter().map(|c| (c.suit, c.rank)).collect();
+        assert_eq!(unique.len(), 52);
     }
 
     #[test]
     fn rank_helpers() {
         assert!(Rank::ACE.is_ace());
         assert!(Rank::KING.is_king());
-        assert_eq!(Rank::new(0), None);
-        assert_eq!(Rank::new(14), None);
-        assert_eq!(Rank::new(7).unwrap().value(), 7);
+        assert_eq!(Rank::new(7).value(), 7);
+        assert_eq!(Rank::all().count(), 13);
+        assert_eq!(Rank::new(10).label(), "10");
+    }
+
+    #[test]
+    #[should_panic(expected = "rank out of range")]
+    fn rank_rejects_out_of_range() {
+        let _ = Rank::new(14);
+    }
+
+    #[test]
+    fn deal_numbers_are_reproducible() {
+        assert_eq!(shuffled_deck(42), shuffled_deck(42));
+        assert_ne!(shuffled_deck(42), shuffled_deck(43));
+        let unique: HashSet<_> = shuffled_deck(7).iter().map(|c| (c.suit, c.rank)).collect();
+        assert_eq!(unique.len(), 52);
     }
 }

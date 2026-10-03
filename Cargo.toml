@@ -1,10 +1,12 @@
 [package]
 name = "solitaire"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 rand = "0.10.3"
 clap = { version = "4", features = ["derive"] }
+unicode-width = "0.2"
