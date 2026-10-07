@@ -2,7 +2,6 @@
 name = "solitaire"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
 
 [dependencies]
 ratatui = "0.30.2"
